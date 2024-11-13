@@ -15,5 +15,5 @@ pub fn SecondEndpoint(request: Request.request) Response.response {
 
 pub fn home(request: Request.request) Response.response {
     std.debug.print("home endpoint: {}\n", .{request});
-    return Response.response{ .httpVersion = "HTTP/1.1", .connection = "close", .contentType = "application/json", .statusCode = StatusCode.statusCode.@"200 OK", .message = "<html><body>test</body></html>" };
+    return Response.response{ .httpVersion = "HTTP/1.1", .connection = "close", .contentType = "text/html", .statusCode = StatusCode.statusCode.@"200 OK", .message = "<html><body>test</body></html>" };
 }

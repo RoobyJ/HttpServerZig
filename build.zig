@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const install = b.getInstallStep();
-    const install_data = b.addInstallDirectory(.{ .source_dir = .{ .cwd_relative = "assets" }, .install_dir = .{ .prefix = {} }, .install_subdir = "assets" });
+    const install_data = b.addInstallDirectory(.{ .source_dir = .{ .cwd_relative = "assets" }, .install_dir = .{ .prefix = {} }, .install_subdir = "bin/assets" });
     install.dependOn(&install_data.step);
 
     // This declares intent for the executable to be installed into the
