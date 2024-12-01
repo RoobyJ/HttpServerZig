@@ -40,9 +40,13 @@ pub fn main() !void {
     std.debug.print("Starting server\n", .{});
     try addEndpoints(&endpointMap);
     const self_addr = try net.Address.resolveIp("127.0.0.1", 5000);
+
+    try listen(self_addr, &endpointMap, allocator);
+}
+
+fn listen(self_addr: net.Address, endpointMap: *std.hash_map.HashMap([]const u8, *const fn (Request.request) Response.response, std.hash_map.StringContext, 80), allocator: Allocator) !void {
     var listener = try self_addr.listen(.{ .reuse_address = true });
     std.debug.print("Listening on {}\n", .{self_addr});
-
     while (listener.accept()) |conn| {
         std.debug.print("Accepted connection from: {}\n", .{conn.address});
         var recv_buf: [4096]u8 = undefined;
