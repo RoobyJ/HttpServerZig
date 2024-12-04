@@ -10,6 +10,7 @@ const Response = @import("Models/Response.zig");
 const Endpoints = @import("Endpoints.zig");
 const StatusCode = @import("Models/StatusCode.zig");
 const HttpHeader = @import("Models/HttpHeader.zig");
+const PathWithParams = @import("Models/PathWithParams.zig");
 
 pub const ServeFileError = error{
     HeaderMalformed,
@@ -33,9 +34,9 @@ const HeaderNames = enum {
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
     const allocator = arena.allocator();
     var endpointMap = std.StringHashMap(*const fn (Request.request) Response.response).init(allocator);
+    defer deinitAll(arena, &endpointMap);
 
     std.debug.print("Starting server\n", .{});
     try addEndpoints(&endpointMap);
@@ -70,11 +71,13 @@ fn listen(self_addr: net.Address, endpointMap: *std.hash_map.HashMap([]const u8,
             std.debug.print("Got connection but no header!\n", .{});
             continue;
         }
+
+        std.debug.print("end nigga\n", .{});
+
         const header = try parseHeader(recv_data);
 
         const path = try parsePath(header.requestLine);
-        // here handle which fn
-        // const
+
         const request = Request.request{ .header = header, .body = "" };
         const result: ?*const fn (Request.request) Response.response = endpointMap.get(path);
         if (result) |endpoint| {
@@ -91,7 +94,7 @@ fn listen(self_addr: net.Address, endpointMap: *std.hash_map.HashMap([]const u8,
 
             std.debug.print("SENDING----\n", .{});
             const responseString = try response.getResponseHeader(allocator);
-            std.debug.print("test----{s}\n", .{responseString});
+
             _ = try conn.stream.writer().write(responseString);
             _ = try conn.stream.writer().write(response.message);
             std.debug.print("SENDED----\n", .{});
@@ -128,21 +131,32 @@ pub fn parseHeader(header: []const u8) !HttpHeader.httpHeader {
     return headerStruct;
 }
 
-pub fn parsePath(requestLine: []const u8) ![]const u8 {
+fn parsePath(requestLine: []const u8, allocator: Allocator) !PathWithParams.PathWithParams {
+    var paramsMap = std.StringHashMap([]const u8).init(allocator);
+
     var requestLineIter = mem.tokenizeScalar(u8, requestLine, ' ');
     const method = requestLineIter.next().?;
     if (!mem.eql(u8, method, "GET")) return ServeFileError.MethodNotSupported;
-    const path = requestLineIter.next().?;
+
+    const temp = requestLineIter.next().?;
+    var pathLineIter = mem.tokenizeScalar(u8, temp, '?');
+    const path = pathLineIter.next().?;
+    while (pathLineIter.next()) |val| {
+        const valExtracted = getKeValueBySeparator(val, '=');
+        try paramsMap.put(valExtracted.key, valExtracted.value);
+    }
+
     if (path.len <= 0) return error.NoPath;
     const proto = requestLineIter.next().?;
     if (!mem.eql(u8, proto, "HTTP/1.1")) return ServeFileError.ProtoNotSupported;
     if (mem.eql(u8, path, "/")) {
         return "/index.html";
     }
-    return path;
+
+    return PathWithParams.PathWithParams{ .path = path, .params = &paramsMap };
 }
 
-pub fn openLocalFile(path: []const u8) ![]u8 {
+fn openLocalFile(path: []const u8) ![]u8 {
     const localPath = path[1..];
     const file = fs.cwd().openFile(localPath, .{}) catch |err| switch (err) {
         error.FileNotFound => {
@@ -158,7 +172,7 @@ pub fn openLocalFile(path: []const u8) ![]u8 {
     return try file.readToEndAlloc(memory, maxSize);
 }
 
-pub fn http404() []const u8 {
+fn http404() []const u8 {
     return "HTTP/1.1 404 NOT FOUND \r\n" ++
         "Connection: close\r\n" ++
         "Content-Type: text/html; charset=utf8\r\n" ++
@@ -167,7 +181,7 @@ pub fn http404() []const u8 {
         "NOT FOUND";
 }
 
-pub fn mimeForPath(path: []const u8) []const u8 {
+fn mimeForPath(path: []const u8) []const u8 {
     const extension = std.fs.path.extension(path);
     inline for (mimeTypes) |kv| {
         if (mem.eql(u8, extension, kv[0])) {
@@ -175,4 +189,30 @@ pub fn mimeForPath(path: []const u8) []const u8 {
         }
     }
     return "application/octet-stream";
+}
+
+fn deinitAll(arena: std.ArenaAllocator, map: *std.StringHashMap(*const fn (Request.request) Response.response)) void {
+    freeEndpointKeysAndDeinit(map);
+    arena.deinit();
+}
+
+fn freeEndpointKeysAndDeinit(self: *std.StringHashMap(*const fn (Request.request) Response.response)) void {
+    var iter = self.keyIterator();
+    while (iter.next()) |key_ptr| {
+        self.allocator.free(key_ptr.*);
+    }
+
+    self.deinit();
+}
+
+// move this to string utils
+fn getKeValueBySeparator(val: []const u8, separator: u8) struct { key: []const u8, value: []const u8 } {
+    var separatorIndex: usize = 0;
+
+    for (val, 0..) |char, i| {
+        if (char == separator) separatorIndex = i;
+    }
+    const separatorId = separatorIndex;
+    // is this right? TODO: check it
+    return struct { .key = val[0..separatorId], .value = val[separatorId + 1 ..] };
 }
