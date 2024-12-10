@@ -1,22 +1,27 @@
 const std = @import("std");
+const print = std.debug.print;
 const net = std.net;
 const fs = std.fs;
 const mem = std.mem;
 const expect = std.testing.expect;
 const endpoints = @import("Endpoints.zig");
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const Request = @import("Models/Request.zig");
 const Response = @import("Models/Response.zig");
 const Endpoints = @import("Endpoints.zig");
 const StatusCode = @import("Models/StatusCode.zig");
 const HttpHeader = @import("Models/HttpHeader.zig");
 const PathWithParams = @import("Models/PathWithParams.zig");
+const StringUtils = @import("utils/StringUtils.zig");
+const Errors = @import("Errors.zig").errors;
 
 pub const ServeFileError = error{
     HeaderMalformed,
     MethodNotSupported,
     ProtoNotSupported,
     UnknownMimeType,
+    InternalError,
 };
 
 const mimeTypes = .{
@@ -35,7 +40,7 @@ const HeaderNames = enum {
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
-    var endpointMap = std.StringHashMap(*const fn (Request.request) Response.response).init(allocator);
+    var endpointMap = std.StringHashMap(*const fn (Request.request, std.StringHashMap([]const u8), Allocator) Errors!Response.response).init(allocator);
     defer deinitAll(arena, &endpointMap);
 
     std.debug.print("Starting server\n", .{});
@@ -45,11 +50,13 @@ pub fn main() !void {
     try listen(self_addr, &endpointMap, allocator);
 }
 
-fn listen(self_addr: net.Address, endpointMap: *std.hash_map.HashMap([]const u8, *const fn (Request.request) Response.response, std.hash_map.StringContext, 80), allocator: Allocator) !void {
+fn listen(self_addr: net.Address, endpointMap: *std.hash_map.HashMap([]const u8, *const fn (Request.request, std.StringHashMap([]const u8), Allocator) Errors!Response.response, std.hash_map.StringContext, 80), allocator: Allocator) !void {
     var listener = try self_addr.listen(.{ .reuse_address = true });
     std.debug.print("Listening on {}\n", .{self_addr});
+
     while (listener.accept()) |conn| {
         std.debug.print("Accepted connection from: {}\n", .{conn.address});
+
         var recv_buf: [4096]u8 = undefined;
         var recv_total: usize = 0;
         while (conn.stream.read(recv_buf[recv_total..])) |recv_len| {
@@ -72,16 +79,14 @@ fn listen(self_addr: net.Address, endpointMap: *std.hash_map.HashMap([]const u8,
             continue;
         }
 
-        std.debug.print("end nigga\n", .{});
-
         const header = try parseHeader(recv_data);
 
-        const path = try parsePath(header.requestLine);
+        const path = try parsePath(header.requestLine, allocator);
 
         const request = Request.request{ .header = header, .body = "" };
-        const result: ?*const fn (Request.request) Response.response = endpointMap.get(path);
+        const result: ?*const fn (Request.request, std.StringHashMap([]const u8), Allocator) Errors!Response.response = endpointMap.get(path.path);
         if (result) |endpoint| {
-            const response: Response.response = endpoint(request);
+            const response = try endpoint(request, path.params, allocator);
             // const mime = mimeForPath(path);
             // const buf = openLocalFile(path) catch |err| {
             //     if (err == error.FileNotFound) {
@@ -106,8 +111,9 @@ fn listen(self_addr: net.Address, endpointMap: *std.hash_map.HashMap([]const u8,
     }
 }
 
-fn addEndpoints(map: *std.hash_map.HashMap([]const u8, *const fn (Request.request) Response.response, std.hash_map.StringContext, 80)) !void {
+fn addEndpoints(map: *std.hash_map.HashMap([]const u8, *const fn (Request.request, std.StringHashMap([]const u8), Allocator) Errors!Response.response, std.hash_map.StringContext, 80)) !void {
     try map.*.put("/index.html", Endpoints.home);
+    // TODO: change this to iterate thru a file where are all endpoint functions are declared, search for each fn name and then add it here to the map
 }
 
 pub fn parseHeader(header: []const u8) !HttpHeader.httpHeader {
@@ -140,9 +146,9 @@ fn parsePath(requestLine: []const u8, allocator: Allocator) !PathWithParams.Path
 
     const temp = requestLineIter.next().?;
     var pathLineIter = mem.tokenizeScalar(u8, temp, '?');
-    const path = pathLineIter.next().?;
+    var path = pathLineIter.next().?;
     while (pathLineIter.next()) |val| {
-        const valExtracted = getKeValueBySeparator(val, '=');
+        const valExtracted = StringUtils.getKeValueBySeparator(val, '=');
         try paramsMap.put(valExtracted.key, valExtracted.value);
     }
 
@@ -150,10 +156,10 @@ fn parsePath(requestLine: []const u8, allocator: Allocator) !PathWithParams.Path
     const proto = requestLineIter.next().?;
     if (!mem.eql(u8, proto, "HTTP/1.1")) return ServeFileError.ProtoNotSupported;
     if (mem.eql(u8, path, "/")) {
-        return "/index.html";
+        path = "/index.html";
     }
 
-    return PathWithParams.PathWithParams{ .path = path, .params = &paramsMap };
+    return PathWithParams.PathWithParams{ .path = path, .params = paramsMap };
 }
 
 fn openLocalFile(path: []const u8) ![]u8 {
@@ -191,28 +197,16 @@ fn mimeForPath(path: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
-fn deinitAll(arena: std.ArenaAllocator, map: *std.StringHashMap(*const fn (Request.request) Response.response)) void {
+fn deinitAll(arena: ArenaAllocator, map: *std.StringHashMap(*const fn (Request.request, std.StringHashMap([]const u8), Allocator) Errors!Response.response)) void {
     freeEndpointKeysAndDeinit(map);
     arena.deinit();
 }
 
-fn freeEndpointKeysAndDeinit(self: *std.StringHashMap(*const fn (Request.request) Response.response)) void {
+fn freeEndpointKeysAndDeinit(self: *std.StringHashMap(*const fn (Request.request, std.StringHashMap([]const u8), Allocator) Errors!Response.response)) void {
     var iter = self.keyIterator();
     while (iter.next()) |key_ptr| {
         self.allocator.free(key_ptr.*);
     }
 
     self.deinit();
-}
-
-// move this to string utils
-fn getKeValueBySeparator(val: []const u8, separator: u8) struct { key: []const u8, value: []const u8 } {
-    var separatorIndex: usize = 0;
-
-    for (val, 0..) |char, i| {
-        if (char == separator) separatorIndex = i;
-    }
-    const separatorId = separatorIndex;
-    // is this right? TODO: check it
-    return struct { .key = val[0..separatorId], .value = val[separatorId + 1 ..] };
 }
