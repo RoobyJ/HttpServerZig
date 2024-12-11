@@ -102,6 +102,9 @@ fn listen(self_addr: net.Address, endpointMap: *std.hash_map.HashMap([]const u8,
 
             _ = try conn.stream.writer().write(responseString);
             _ = try conn.stream.writer().write(response.message);
+
+            allocator.free(responseString);
+            allocator.free(response.message);
             std.debug.print("SENDED----\n", .{});
         } else {
             // doesn't exists need to handle it somehow
